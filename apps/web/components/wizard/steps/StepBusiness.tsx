@@ -65,7 +65,7 @@ export function StepBusiness({ sil, onNext, onBack, saving }: StepProps) {
         </FormGroup>
         <FormRow>
           <FormGroup label="Años en el mercado">
-            <Input type="number" value={years} onChange={setYears} placeholder="Ej. 8" />
+            <Input value={String(years)} onChange={setYears} placeholder="Ej. 8" />
           </FormGroup>
           <FormGroup label="Tamaño del equipo de ventas">
             <Select value={teamSize} onChange={setTeamSize} options={TEAM_SIZES} />
@@ -86,7 +86,7 @@ export function StepBusiness({ sil, onNext, onBack, saving }: StepProps) {
       </Section>
 
       <NavButtons onBack={onBack} onNext={handleNext} nextLabel="Continuar → Portafolio"
-        saving={saving} step={0} isFirst />
+        saving={saving} step={0} />
     </div>
   )
 }

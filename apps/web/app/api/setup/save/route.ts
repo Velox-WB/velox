@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
       data: {
         setupStep: step,
         setupCompleted: completed ?? (step >= 6),
-        sil,
+        sil: sil as any,
         // Update monthly goal if available
         ...(sil.commercialProcess && typeof sil.commercialProcess === 'object' &&
           'monthlyGoal' in sil.commercialProcess &&

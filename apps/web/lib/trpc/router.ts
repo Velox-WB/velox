@@ -84,7 +84,7 @@ const dealsRouter = router({
           ...input,
           probabilityManual: prob,
           weightedValue: (input.value * prob) / 100,
-        },
+        } as any,
         include: { contact: true },
       })
 
@@ -192,8 +192,7 @@ const contactsRouter = router({
 
       if (input.source === 'REFERIDO') icpScore += 15
 
-      return ctx.db.contact.create({
-        data: { organizationId: ctx.org.id, ...input, icpScore: Math.min(100, icpScore) },
+      return ctx.db.contact.create({data: { organizationId: ctx.org.id, ...input, icpScore: Math.min(100, icpScore) } as any,
       })
     }),
 })

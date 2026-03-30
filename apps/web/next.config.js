@@ -1,13 +1,12 @@
-/** @type {import('next').NextConfig} */
+/** @type {import("next").NextConfig} */
 const nextConfig = {
-  transpilePackages: ['@velox/db', '@velox/shared'],
   experimental: {
-    serverComponentsExternalPackages: ['@prisma/client'],
+    serverComponentsExternalPackages: ["@prisma/client", "bullmq", "ioredis"],
   },
   images: {
     remotePatterns: [
-      { protocol: 'https', hostname: 'img.clerk.com' },
-      { protocol: 'https', hostname: 'images.clerk.dev' },
+      { protocol: "https", hostname: "img.clerk.com" },
+      { protocol: "https", hostname: "images.clerk.dev" },
     ],
   },
 }
