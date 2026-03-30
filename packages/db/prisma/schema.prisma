@@ -1,0 +1,471 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// VELOX — Schema de Base de Datos
+// Multi-tenant con Row Level Security por organization_id
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ORGANIZATIONS (Tenants)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique // Clerk org ID
+  name      String
+  slug      String   @unique
+  plan      Plan     @default(STARTER)
+  
+  // Setup Wizard Progress
+  setupStep      Int     @default(0)   // 0-6, 6 = completo
+  setupCompleted Boolean @default(false)
+  
+  // Sales Intelligence Layer (JSONB)
+  // Estructura: { business, portfolio, valueProposition, segments, icp, commercialProcess }
+  sil Json?
+  
+  // Pipeline configuration
+  pipelineStages Json @default("[{\"id\":\"prospecto\",\"name\":\"Prospecto\",\"probability\":0,\"maxDays\":3,\"color\":\"#5a5a72\"},{\"id\":\"lead\",\"name\":\"Lead\",\"probability\":10,\"maxDays\":5,\"color\":\"#60a5fa\"},{\"id\":\"oportunidad\",\"name\":\"Oportunidad\",\"probability\":20,\"maxDays\":7,\"color\":\"#818cf8\"},{\"id\":\"propuesta\",\"name\":\"Propuesta\",\"probability\":40,\"maxDays\":10,\"color\":\"#a78bfa\"},{\"id\":\"forecast\",\"name\":\"Forecast\",\"probability\":60,\"maxDays\":7,\"color\":\"#f59e0b\"},{\"id\":\"orden\",\"name\":\"Orden de Compra\",\"probability\":80,\"maxDays\":5,\"color\":\"#22d3a0\"},{\"id\":\"cerrado\",\"name\":\"Cerrado\",\"probability\":100,\"maxDays\":null,\"color\":\"#34d399\"},{\"id\":\"perdido\",\"name\":\"Perdido\",\"probability\":null,\"maxDays\":null,\"color\":\"#f87171\"}]")
+  
+  // Settings
+  currency    String  @default("USD")
+  timezone    String  @default("America/Costa_Rica")
+  locale      String  @default("es")
+  monthlyGoal Decimal @default(0) @db.Decimal(12, 2)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  members      OrganizationMember[]
+  contacts     Contact[]
+  deals        Deal[]
+  quotes       Quote[]
+  activities   Activity[]
+  aiAlerts     AiAlert[]
+  aiConversations AiConversation[]
+  notifications   Notification[]
+  auditLogs    AuditLog[]
+
+  @@map("organizations")
+}
+
+enum Plan {
+  STARTER
+  GROWTH
+  PRO
+  ENTERPRISE
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USERS & MEMBERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique
+  email     String   @unique
+  name      String
+  avatarUrl String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  memberships     OrganizationMember[]
+  assignedDeals   Deal[]
+  activities      Activity[]
+  notifications   Notification[]
+  auditLogs       AuditLog[]
+
+  @@map("users")
+}
+
+model OrganizationMember {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  role           MemberRole @default(SELLER)
+  
+  createdAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@map("organization_members")
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MANAGER
+  SELLER
+  VIEWER
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTACTS (CRM)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Contact {
+  id             String   @id @default(cuid())
+  organizationId String
+  
+  name      String
+  company   String?
+  role      String?   // Cargo — usado en ICP scoring
+  email     String?
+  phone     String?   // WhatsApp / teléfono
+  
+  source    LeadSource @default(OTHER)
+  
+  // ICP Scoring (calculado vs SIL del tenant)
+  icpScore     Int  @default(0)    // 0-100
+  icpBreakdown Json?               // { size: 80, role: 90, urgency: 70, ... }
+  
+  // Referral tracking
+  referrerId String?
+  referrer   Contact?  @relation("Referrals", fields: [referrerId], references: [id])
+  referrals  Contact[] @relation("Referrals")
+  
+  tags     String[] @default([])
+  notes    String?
+  metadata Json?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  deals        Deal[]
+  activities   Activity[]
+
+  @@index([organizationId])
+  @@index([organizationId, icpScore])
+  @@map("contacts")
+}
+
+enum LeadSource {
+  WHATSAPP
+  EMAIL
+  REFERIDO
+  WEB
+  INSTAGRAM
+  FACEBOOK
+  LLAMADA
+  LINKEDIN
+  OTRO
+  OTHER
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEALS (Pipeline)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Deal {
+  id             String   @id @default(cuid())
+  organizationId String
+  contactId      String
+  assignedToId   String?
+  
+  name  String
+  stage DealStage @default(PROSPECTO)
+  
+  // Probabilidades
+  probabilityManual Int     @default(0)     // Por etapa configurada
+  probabilityAi     Decimal @default(0) @db.Decimal(5, 2)  // Fase 3: modelo IA
+  
+  // Valores
+  value         Decimal @db.Decimal(12, 2)
+  weightedValue Decimal @default(0) @db.Decimal(12, 2) // calculado: value * probability_ai
+  currency      String  @default("USD")
+  
+  source LeadSource @default(OTHER)
+  
+  // Tracking temporal — base del motor de alertas Fase 2
+  lastActivityAt DateTime @default(now())
+  daysInStage    Int      @default(0)       // Actualizado por job nocturno
+  stageChangedAt DateTime @default(now())
+  
+  // IA Signals (Fase 3)
+  aiSignals    Json?   // { canal: 0.9, icpScore: 0.85, velocity: 0.7, ... }
+  aiCloseDate  DateTime?
+  aiConfidence Decimal?  @db.Decimal(3, 2)
+  
+  // Estado
+  closedAt   DateTime?
+  lostReason String?
+  lostAt     DateTime?
+  
+  notes    String?
+  metadata Json?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contact      Contact      @relation(fields: [contactId], references: [id])
+  assignedTo   User?        @relation(fields: [assignedToId], references: [id])
+  quotes       Quote[]
+  activities   Activity[]
+  aiAlerts     AiAlert[]
+
+  @@index([organizationId])
+  @@index([organizationId, stage])
+  @@index([organizationId, lastActivityAt])
+  @@map("deals")
+}
+
+enum DealStage {
+  PROSPECTO
+  LEAD
+  OPORTUNIDAD
+  PROPUESTA
+  FORECAST
+  ORDEN
+  CERRADO
+  PERDIDO
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUOTES (Cotizador)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Quote {
+  id             String   @id @default(cuid())
+  organizationId String
+  dealId         String
+  
+  number     String   // #001, #002...
+  status     QuoteStatus @default(DRAFT)
+  
+  // Items (array de { name, qty, price, total })
+  items     Json
+  subtotal  Decimal @db.Decimal(12, 2)
+  taxRate   Decimal @default(0.13) @db.Decimal(4, 3)
+  tax       Decimal @db.Decimal(12, 2)
+  total     Decimal @db.Decimal(12, 2)
+  currency  String  @default("USD")
+  
+  // IA fields (Fase 3)
+  aiApprovalProbability Decimal? @db.Decimal(3, 2)
+  aiSuggestedItems      Json?
+  aiRationale           String?
+  
+  validUntil DateTime?
+  notes      String?
+  
+  // Tracking
+  sentAt     DateTime?
+  openedAt   DateTime?
+  approvedAt DateTime?
+  rejectedAt DateTime?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  deal         Deal         @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("quotes")
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  OPENED
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIVITIES (Timeline)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Activity {
+  id             String   @id @default(cuid())
+  organizationId String
+  dealId         String?
+  contactId      String?
+  userId         String
+  
+  type    ActivityType
+  title   String
+  notes   String?
+  outcome String?
+  
+  scheduledAt  DateTime?
+  completedAt  DateTime?
+  
+  metadata Json?
+  
+  createdAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  deal         Deal?        @relation(fields: [dealId], references: [id])
+  contact      Contact?     @relation(fields: [contactId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@index([organizationId])
+  @@index([dealId])
+  @@map("activities")
+}
+
+enum ActivityType {
+  CALL
+  EMAIL
+  WHATSAPP
+  MEETING
+  NOTE
+  QUOTE_SENT
+  STAGE_CHANGE
+  ALERT_ACTIONED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI ALERTS (Motor Proactivo Fase 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AiAlert {
+  id             String   @id @default(cuid())
+  organizationId String
+  dealId         String?
+  
+  type     AlertType
+  severity AlertSeverity @default(WARNING)
+  
+  title   String
+  summary String
+  
+  // Contenido generado por Claude
+  diagnosis    String   // Análisis detallado
+  actions      Json     // Array de { title, description, order }
+  draftMessage String?  // Borrador de mensaje listo para enviar
+  
+  // Estado
+  dismissedAt DateTime?
+  actionedAt  DateTime?
+  
+  // Metadata del escaneo
+  scanMetadata Json?  // { daysInStage, threshold, signals, ... }
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  deal         Deal?        @relation(fields: [dealId], references: [id])
+
+  @@index([organizationId])
+  @@index([organizationId, severity])
+  @@index([organizationId, createdAt])
+  @@map("ai_alerts")
+}
+
+enum AlertType {
+  INACTIVITY        // Sin actividad > umbral
+  PROPOSAL_UNOPENED // Propuesta no abierta
+  NO_NEXT_STEP      // Sin siguiente paso definido
+  CLOSE_OPPORTUNITY // Listo para cerrar
+  ICP_MATCH         // Nuevo prospecto con alto ICP fit
+  PIPELINE_INSIGHT  // Análisis global del pipeline
+}
+
+enum AlertSeverity {
+  CRITICAL
+  WARNING
+  OPPORTUNITY
+  INFO
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI CONVERSATIONS (Historial del Agente)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AiConversation {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String?
+  dealId         String?
+  
+  // Array de { role: 'user'|'assistant', content: string, timestamp }
+  messages Json @default("[]")
+  
+  // Snapshot del contexto usado (para audit y mejora)
+  contextSnapshot Json?
+  
+  // Métricas de uso (para billing)
+  tokensInput  Int @default(0)
+  tokensOutput Int @default(0)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("ai_conversations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  
+  type    String  // 'alert' | 'deal_update' | 'quote_approved' | ...
+  title   String
+  body    String
+  link    String?
+  
+  payload Json?
+  readAt  DateTime?
+  
+  createdAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String?
+  
+  entityType String  // 'deal' | 'contact' | 'quote' | 'organization' | ...
+  entityId   String
+  action     String  // 'create' | 'update' | 'delete' | 'stage_change' | ...
+  
+  before Json?
+  after  Json?
+  
+  ipAddress  String?
+  userAgent  String?
+  
+  createdAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id])
+
+  @@index([organizationId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
